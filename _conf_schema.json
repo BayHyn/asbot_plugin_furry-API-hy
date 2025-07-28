@@ -1,0 +1,8 @@
+{
+    "api_key": {
+        "description": "趣绮梦云黑API Key",
+        "type": "string",
+        "hint": "请填写你在趣绮梦云黑平台申请的API Key",
+        "obvious_hint": true
+    }
+}
