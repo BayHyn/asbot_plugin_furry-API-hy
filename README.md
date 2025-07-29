@@ -4,6 +4,6 @@ asbot_plugin_furry-API-hy
 
 懒着写
 
-1.0
+2.0
 
 作者豪毛QQ3322969592
