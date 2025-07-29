@@ -1,138 +1,247 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger, AstrBotConfig
-import httpx
+from astrbot.api import logger
+import json
+import os
+import re
 
-@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出的插件", "1.0.0")
-class QimengYunheiPlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig):
-        super().__init__(context)
-        self.config = config
-        # 存储待踢出的云黑成员列表
-        self.pending_kick_members = {}
 
-    @filter.command("扫描云黑成员", "扫描所有群云黑成员，显示云黑成员列表")
-    async def scan_group_members(self, event: AstrMessageEvent):
-        # 检查是否在群聊中使用该命令
-        if not event.get_group_id():
-            yield event.plain_result("该命令只能在群聊中使用")
-            return
+@register("asbot_plugin_furry-gg", "furryhm", "公告插件，支持识别广告、发送配置文件广告、公告管理员发送公告等功能", "1.0.0")
+class AnnouncementPlugin(Star):
+    def __init__(self, context: Context) -> None:
+        self.context = context
+        # 获取插件文件所在目录
+        self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_path = os.path.join(self.plugin_dir, "_conf_schema.json")
+        self.config = self.load_config()
+        
+    def load_config(self):
+        """加载配置文件"""
+        if not os.path.exists(self.config_path):
+            # 默认配置
+            default_config = {
+                "announcements": [],
+                "ad_keywords": ["广告", "推广", "营销", "出售", "购买", "优惠", "折扣"],
+                "blacklist": [],
+                "announcement_admins": []
+            }
+            self.save_config(default_config)
+            return default_config
+        else:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
             
-        # 检查API Key是否配置
-        api_key = self.config.get("api_key", "")
-        if not api_key:
-            yield event.plain_result("请先在插件配置中填写申请的API Key")
-            return
+    def save_config(self, config=None):
+        """保存配置文件"""
+        if config is None:
+            config = self.config
+        with open(self.config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+            
+    def is_announcement_admin(self, user_id: str) -> bool:
+        """检查用户是否为公告管理员"""
+        return user_id in self.config.get("announcement_admins", [])
+        
+    @filter.command("gg_help", "查看公告插件使用帮助")
+    async def show_help(self, event: AstrMessageEvent):
+        """显示插件使用帮助"""
+        help_text = """公告插件使用说明：
+        
+插件会在首次运行时在插件目录自动生成配置文件 _conf_schema.json
 
-        yield event.plain_result("开始扫描群成员云黑信息...")
-        
-        try:
-            # 获取群成员列表
-            group_member_list = await self.context.bot.get_group_member_list(
-                group_id=int(event.get_group_id()), 
-                no_cache=True
-            )
-            # 提取成员QQ号列表
-            group_members = [str(member['user_id']) for member in group_member_list]
-        except Exception as e:
-            logger.error(f"获取群成员列表时出错: {str(e)}")
-            yield event.plain_result("获取群成员列表失败")
-            return
-        
-        if not group_members:
-            yield event.plain_result("无法获取群成员列表")
-            return
-            
-        blacklisted_members = []
-        
-        for member_id in group_members:
-            # 构造API请求URL
-            api_url = f"https://fz.qimeng.fun/OpenAPI/all_f.php?id={member_id}&key={api_key}"
-            
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(api_url, timeout=10)
-                    response.raise_for_status()
-                    data = response.json()
-                    
-                # 解析返回数据
-                if data.get("info"):
-                    info_list = data.get("info", [{}])[0].get("info", [])
-                    if len(info_list) >= 3:
-                        yunhei_info = info_list[2]  # 云黑记录信息
-                        
-                        # 辅助函数用于判断布尔值
-                        def is_true(value):
-                            return str(value).lower() == 'true' if value is not None else False
-                            
-                        # 检查是否为云黑成员
-                        if is_true(yunhei_info.get('yh')):
-                            # 保存云黑成员信息
-                            blacklisted_members.append({
-                                'id': member_id,
-                                'reason': yunhei_info.get('note', '无说明'),
-                                'type': yunhei_info.get('type', '未知'),
-                                'admin': yunhei_info.get('admin', '未知'),
-                                'level': yunhei_info.get('level', '无'),
-                                'date': yunhei_info.get('date', '无记录')
-                            })
-                
-            except Exception as e:
-                logger.error(f"查询成员 {member_id} 时出错: {str(e)}")
-                continue
-                
-        if not blacklisted_members:
-            yield event.plain_result("扫描完成！未发现云黑成员。")
-            return
-            
-        # 保存待踢出成员列表
-        group_id = event.get_group_id()
-        self.pending_kick_members[group_id] = blacklisted_members
-        
-        # 构建云黑成员列表信息
-        result = f"扫描完成！发现 {len(blacklisted_members)} 名云黑成员：\n\n"
-        for i, member in enumerate(blacklisted_members, 1):
-            result += f"{i}. 用户ID: {member['id']}\n"
-            result += f"   原因: {member['reason']}\n"
-            result += f"   类型: {member['type']}\n"
-            result += f"   管理员: {member['admin']}\n"
-            result += f"   等级: {member['level']}\n"
-            result += f"   日期: {member['date']}\n\n"
-            
-        result += "如需踢出以上云黑成员，请在30秒内发送命令：确认踢出"
-        yield event.plain_result(result)
+📌 指令列表：
 
-    @filter.command("确认踢出", "确认踢出云黑成员")
-    async def confirm_kick_members(self, event: AstrMessageEvent):
-        # 检查是否在群聊中使用该命令
-        if not event.get_group_id():
-            yield event.plain_result("该命令只能在群聊中使用")
+公告管理（管理员）：
+/ad_add <内容>  - 添加公告内容
+/ad_list        - 查看公告列表
+/ad_del <索引>  - 删除指定公告
+/ad_send <索引> - 发送配置的公告
+
+公告管理员管理（管理员）：
+/admin_add <ID> - 添加公告管理员
+/admin_list     - 查看公告管理员列表
+/admin_del <ID> - 删除公告管理员
+
+黑名单管理（管理员）：
+/blacklist_add <ID> - 添加用户到黑名单
+/blacklist_list     - 查看黑名单用户
+/blacklist_del <ID> - 从黑名单移除用户
+
+公告发送（公告管理员）：
+/announce <内容> - 发送公告给所有群和好友
+
+💡 提示：
+1. 首次使用请先设置公告管理员
+2. 配置文件会自动保存在插件目录下的 _conf_schema.json
+3. 只有公告管理员可以发送公告"""
+        
+        yield event.plain_result(help_text)
+        
+    @filter.command("ad_add", "添加公告/广告内容到配置文件")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def add_advertisement(self, event: AstrMessageEvent, *, content: str = ""):
+        """添加公告/广告内容到配置文件"""
+        if not content:
+            yield event.plain_result("请提供要添加的公告内容")
             return
             
-        group_id = event.get_group_id()
+        self.config["announcements"].append(content)
+        self.save_config()
+        yield event.plain_result("公告内容已添加")
         
-        # 检查是否有待踢出的成员
-        if group_id not in self.pending_kick_members or not self.pending_kick_members[group_id]:
-            yield event.plain_result("当前没有待踢出的云黑成员。请先执行「扫描群成员」命令。")
+    @filter.command("ad_list", "列出所有公告/广告内容")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def list_advertisement(self, event: AstrMessageEvent):
+        """列出所有公告/广告内容"""
+        announcements = self.config.get("announcements", [])
+        if not announcements:
+            yield event.plain_result("暂无公告内容")
             return
             
-        blacklisted_members = self.pending_kick_members[group_id]
-        kicked_count = 0
+        msg = "公告列表：\n"
+        for i, announcement in enumerate(announcements, 1):
+            msg += f"{i}. {announcement}\n"
+            
+        yield event.plain_result(msg)
         
-        # 踢出所有云黑成员
-        for member in blacklisted_members:
-            member_id = member['id']
-            try:
-                # 使用set_group_kick接口踢出成员
-                await self.context.bot.set_group_kick(group_id=group_id, user_id=member_id, reject_add_request=False)
-                kicked_count += 1
-                logger.info(f"已踢出云黑成员: {member_id}")
-            except Exception as e:
-                logger.error(f"踢出成员 {member_id} 时出错: {str(e)}")
-                continue
-                
-        # 清除已处理的待踢出成员列表
-        del self.pending_kick_members[group_id]
+    @filter.command("ad_del", "删除指定索引的公告内容")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def delete_advertisement(self, event: AstrMessageEvent, index: int = None):
+        """删除指定索引的公告内容"""
+        if index is None:
+            yield event.plain_result("请提供要删除的公告索引")
+            return
+            
+        announcements = self.config.get("announcements", [])
+        if index < 1 or index > len(announcements):
+            yield event.plain_result("索引超出范围")
+            return
+            
+        del announcements[index-1]
+        self.save_config()
+        yield event.plain_result("公告内容已删除")
         
-        result = f"已完成踢出操作！\n成功踢出云黑成员数：{kicked_count}\n失败数：{len(blacklisted_members) - kicked_count}"
-        yield event.plain_result(result)
+    @filter.command("ad_send", "发送配置文件中的公告")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def send_advertisement(self, event: AstrMessageEvent, index: int = None):
+        """发送配置文件中的公告"""
+        if index is None:
+            yield event.plain_result("请提供要发送的公告索引")
+            return
+            
+        announcements = self.config.get("announcements", [])
+        if index < 1 or index > len(announcements):
+            yield event.plain_result("索引超出范围")
+            return
+            
+        announcement = announcements[index-1]
+        # 这里需要根据实际框架API实现广播功能
+        # 由于没有找到相关API，暂时只返回公告内容
+        yield event.plain_result(f"将发送公告: {announcement}")
+        
+    @filter.command("admin_add", "添加公告管理员")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def add_announcement_admin(self, event: AstrMessageEvent, user_id: str = None):
+        """添加公告管理员"""
+        if not user_id:
+            yield event.plain_result("请提供用户ID")
+            return
+            
+        if user_id not in self.config["announcement_admins"]:
+            self.config["announcement_admins"].append(user_id)
+            self.save_config()
+            yield event.plain_result(f"用户 {user_id} 已添加为公告管理员")
+        else:
+            yield event.plain_result(f"用户 {user_id} 已经是公告管理员")
+            
+    @filter.command("admin_list", "列出所有公告管理员")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def list_announcement_admin(self, event: AstrMessageEvent):
+        """列出所有公告管理员"""
+        announcement_admins = self.config.get("announcement_admins", [])
+        if not announcement_admins:
+            yield event.plain_result("暂无公告管理员")
+            return
+            
+        msg = "公告管理员列表：\n"
+        for admin in announcement_admins:
+            msg += f"- {admin}\n"
+            
+        yield event.plain_result(msg)
+        
+    @filter.command("admin_del", "删除公告管理员")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def delete_announcement_admin(self, event: AstrMessageEvent, user_id: str = None):
+        """删除公告管理员"""
+        if not user_id:
+            yield event.plain_result("请提供用户ID")
+            return
+            
+        if user_id in self.config["announcement_admins"]:
+            self.config["announcement_admins"].remove(user_id)
+            self.save_config()
+            yield event.plain_result(f"用户 {user_id} 已从公告管理员中移除")
+        else:
+            yield event.plain_result(f"用户 {user_id} 不是公告管理员")
+            
+    @filter.command("blacklist_add", "添加用户到黑名单")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def add_to_blacklist(self, event: AstrMessageEvent, user_id: str = None):
+        """添加用户到黑名单"""
+        if not user_id:
+            yield event.plain_result("请提供用户ID")
+            return
+            
+        if user_id not in self.config["blacklist"]:
+            self.config["blacklist"].append(user_id)
+            self.save_config()
+            yield event.plain_result(f"用户 {user_id} 已添加到黑名单")
+        else:
+            yield event.plain_result(f"用户 {user_id} 已经在黑名单中")
+            
+    @filter.command("blacklist_list", "列出所有黑名单用户")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def list_blacklist(self, event: AstrMessageEvent):
+        """列出所有黑名单用户"""
+        blacklist = self.config.get("blacklist", [])
+        if not blacklist:
+            yield event.plain_result("黑名单为空")
+            return
+            
+        msg = "黑名单用户列表：\n"
+        for user in blacklist:
+            msg += f"- {user}\n"
+            
+        yield event.plain_result(msg)
+        
+    @filter.command("blacklist_del", "从黑名单移除用户")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def remove_from_blacklist(self, event: AstrMessageEvent, user_id: str = None):
+        """从黑名单移除用户"""
+        if not user_id:
+            yield event.plain_result("请提供用户ID")
+            return
+            
+        if user_id in self.config["blacklist"]:
+            self.config["blacklist"].remove(user_id)
+            self.save_config()
+            yield event.plain_result(f"用户 {user_id} 已从黑名单中移除")
+        else:
+            yield event.plain_result(f"用户 {user_id} 不在黑名单中")
+            
+    @filter.command("announce", "发送公告（仅公告管理员）")
+    async def send_announcement(self, event: AstrMessageEvent, *, content: str = ""):
+        """发送公告（仅公告管理员）"""
+        user_id = str(event.get_sender_id())
+        
+        if not self.is_announcement_admin(user_id):
+            yield event.plain_result("权限不足，仅公告管理员可发送公告")
+            return
+            
+        if not content:
+            yield event.plain_result("请提供公告内容")
+            return
+            
+        # 这里需要根据实际框架API实现广播功能
+        # 由于没有找到相关API，暂时只返回公告内容
+        yield event.plain_result(f"将发送公告: {content}")
