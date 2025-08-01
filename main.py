@@ -27,7 +27,7 @@ class QimengYunheiPlugin(Star):
     async def _rate_limited_request(self, url):
         """
         带频率限制的API请求
-        限制为25次请求/5秒
+        限制为20次请求/5秒
         """
         current_time = time.time()
         
@@ -94,7 +94,7 @@ class QimengYunheiPlugin(Star):
         处理群成员增加事件
         """
         # 检查事件类型是否为群成员增加
-        raw_message = event.get_raw_message()
+        raw_message = event.message_obj.raw_message
         if not (raw_message.get('post_type') == 'notice' and raw_message.get('notice_type') == 'group_increase'):
             return
             
