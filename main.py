@@ -23,8 +23,6 @@ class QimengYunheiPlugin(Star):
         self.time_window = 5  # 秒
         # 自动清理任务
         self.cleanup_task = asyncio.create_task(self._periodic_cleanup())
-        # 注册群成员增加事件监听器
-        self.context.register_event_listener("group_member_increase", self.on_group_member_increase)
 
     async def _rate_limited_request(self, url):
         """
@@ -90,14 +88,19 @@ class QimengYunheiPlugin(Star):
             except Exception as e:
                 logger.error(f"定时清理任务出错: {str(e)}")
 
-    async def on_group_member_increase(self, event: dict):
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def handle_group_add(self, event: AstrMessageEvent):
         """
         处理群成员增加事件
-        当有新成员加入群组时，自动检测其云黑状态
         """
+        # 检查事件类型是否为群成员增加
+        raw_message = event.get_raw_message()
+        if not (raw_message.get('post_type') == 'notice' and raw_message.get('notice_type') == 'group_increase'):
+            return
+            
         # 获取群组ID和新成员ID
-        group_id = str(event.get('group_id'))
-        user_id = str(event.get('user_id'))
+        group_id = raw_message.get('group_id')
+        user_id = raw_message.get('user_id')
         
         # 检查API Key是否配置
         api_key = self.config.get("api_key", "")
