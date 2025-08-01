@@ -1,5 +1,5 @@
 name:  asbot_plugin_furry-API-hy
-desc: "调用趣绮梦云黑API的群黑云查询踢出的插件"
-version: v1.0
+desc: "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件"
+version: v3.0
 author: furryhm
 repo: https://github.com/furryHM-mrz/asbot_plugin_furry-API-hy
