@@ -47,11 +47,10 @@ class QimengYunheiPlugin(Star):
                 while self.request_timestamps and self.request_timestamps[0] < current_time - self.time_window:
                     self.request_timestamps.popleft()
         
-        # 记录当前请求时间
-        self.request_timestamps.append(current_time)
-        
         # 发起请求
         async with httpx.AsyncClient() as client:
+            # 记录当前请求时间（在实际发起请求之前）
+            self.request_timestamps.append(current_time)
             try:
                 response = await client.get(url, timeout=10)
                 response.raise_for_status()
@@ -101,7 +100,7 @@ class QimengYunheiPlugin(Star):
         """
         判断是否为云黑成员
         """
-        return str(yunhei_info.get('yh', '')).lower() == 'true' if yunhei_info.get('yh') is not None else False
+        return str(yunhei_info.get('yh', False)).lower() == 'true'
 
     async def _check_member_yunhei_status(self, member_id: Union[str, int], api_key: str) -> Optional[Dict[str, str]]:
         """
@@ -113,19 +112,22 @@ class QimengYunheiPlugin(Star):
             
             # 解析返回数据
             if data.get("info"):
-                info_list = data.get("info", [{}])[0].get("info", [])
-                if len(info_list) >= 3:
-                    yunhei_info = info_list[2]  # 云黑记录信息
-                    # 检查是否为云黑成员
-                    if self._is_yunhei_member(yunhei_info):
-                        return {
-                            'id': str(member_id),
-                            'reason': yunhei_info.get('note', '无说明'),
-                            'type': yunhei_info.get('type', '未知'),
-                            'admin': yunhei_info.get('admin', '未知'),
-                            'level': yunhei_info.get('level', '无'),
-                            'date': yunhei_info.get('date', '无记录')
-                        }
+                info_data = data.get("info", [])
+                # 检查列表是否为空
+                if info_data and len(info_data) > 0:
+                    info_list = info_data[0].get("info", [])
+                    if len(info_list) >= 3:
+                        yunhei_info = info_list[2]  # 云黑记录信息
+                        # 检查是否为云黑成员
+                        if self._is_yunhei_member(yunhei_info):
+                            return {
+                                'id': str(member_id),
+                                'reason': yunhei_info.get('note', '无说明'),
+                                'type': yunhei_info.get('type', '未知'),
+                                'admin': yunhei_info.get('admin', '未知'),
+                                'level': yunhei_info.get('level', '无'),
+                                'date': yunhei_info.get('date', '无记录')
+                            }
         except Exception as e:
             logger.error(f"查询成员 {member_id} 云黑状态时出错: {str(e)}")
         return None
@@ -146,51 +148,6 @@ class QimengYunheiPlugin(Star):
         except Exception as e:
             logger.error(f"踢出成员 {member_id} 时出错: {str(e)}")
             return False
-
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def handle_group_add(self, event: AstrMessageEvent) -> None:
-        """
-        处理群成员增加事件
-        """
-        # 检查事件类型是否为群成员增加
-        raw_message = event.message_obj.raw_message
-        if not (raw_message.get('post_type') == 'notice' and raw_message.get('notice_type') == 'group_increase'):
-            return
-            
-        # 获取群组ID和新成员ID
-        group_id = raw_message.get('group_id')
-        user_id = raw_message.get('user_id')
-        
-        # 检查API Key是否配置
-        api_key = self.config.get("api_key", "")
-        if not api_key:
-            logger.warning("API Key未配置，无法检测新成员云黑状态")
-            return
-            
-        try:
-            # 检查成员是否为云黑成员
-            blacklisted_member = await self._check_member_yunhei_status(user_id, api_key)
-            
-            if blacklisted_member:
-                # 踢出成员
-                success = await self._kick_member(
-                    group_id, 
-                    user_id, 
-                    blacklisted_member['reason'], 
-                    blacklisted_member['type'], 
-                    blacklisted_member['date']
-                )
-                
-                if success:
-                    # 发送通知消息
-                    kick_message = (f"检测到云黑成员 {user_id} 已被自动踢出\n"
-                                  f"原因: {blacklisted_member['reason']}\n"
-                                  f"类型: {blacklisted_member['type']}\n"
-                                  f"日期: {blacklisted_member['date']}")
-                    await self.context.bot.send_message(group_id=int(group_id), message=kick_message)
-                        
-        except Exception as e:
-            logger.error(f"检测新成员 {user_id} 云黑状态时出错: {str(e)}")
 
     @filter.command("扫描云黑成员", "扫描所有群云黑成员，显示云黑成员列表")
     async def scan_group_members(self, event: AstrMessageEvent) -> None:
@@ -263,7 +220,7 @@ class QimengYunheiPlugin(Star):
         
         # 检查是否有待踢出的成员
         if group_id not in self.pending_kick_members or not self.pending_kick_members[group_id]:
-            yield event.plain_result("当前没有待踢出的云黑成员。请先执行「防撤回 查看」命令。")
+            yield event.plain_result("当前没有待踢出的云黑成员。请先执行「扫描云黑成员」命令。")
             return
             
         blacklisted_members = self.pending_kick_members[group_id]
@@ -272,7 +229,7 @@ class QimengYunheiPlugin(Star):
         tasks = [self._kick_member(group_id, member['id'], member.get('reason', ''), member.get('type', ''), member.get('date', '')) for member in blacklisted_members]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        kicked_count = sum(1 for result in results if result is True and isinstance(result, bool))
+        kicked_count = sum(1 for result in results if result is True)
         
         # 清除已处理的待踢出成员列表
         if group_id in self.pending_kick_members:
@@ -313,6 +270,51 @@ class QimengYunheiPlugin(Star):
             
         except ValueError:
             yield event.plain_result("参数错误，请输入有效的秒数\n用法: 设置清理时间 <秒数>")
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def handle_group_add(self, event: AstrMessageEvent) -> None:
+        """
+        处理群成员增加事件
+        """
+        # 检查事件类型是否为群成员增加
+        raw_message = event.message_obj.raw_message
+        if not (raw_message.get('post_type') == 'notice' and raw_message.get('notice_type') == 'group_increase'):
+            return
+            
+        # 获取群组ID和新成员ID
+        group_id = raw_message.get('group_id')
+        user_id = raw_message.get('user_id')
+        
+        # 检查API Key是否配置
+        api_key = self.config.get("api_key", "")
+        if not api_key:
+            logger.warning("API Key未配置，无法检测新成员云黑状态")
+            return
+            
+        try:
+            # 检查成员是否为云黑成员
+            blacklisted_member = await self._check_member_yunhei_status(user_id, api_key)
+            
+            if blacklisted_member:
+                # 踢出成员
+                success = await self._kick_member(
+                    group_id, 
+                    user_id, 
+                    blacklisted_member['reason'], 
+                    blacklisted_member['type'], 
+                    blacklisted_member['date']
+                )
+                
+                if success:
+                    # 发送通知消息
+                    kick_message = (f"检测到云黑成员 {user_id} 已被自动踢出\n"
+                                  f"原因: {blacklisted_member['reason']}\n"
+                                  f"类型: {blacklisted_member['type']}\n"
+                                  f"日期: {blacklisted_member['date']}")
+                    await self.context.bot.send_message(group_id=int(group_id), message=kick_message)
+                        
+        except Exception as e:
+            logger.error(f"检测新成员 {user_id} 云黑状态时出错: {str(e)}")
 
     async def terminate(self) -> None:
         """
