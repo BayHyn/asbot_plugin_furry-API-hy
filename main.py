@@ -13,16 +13,10 @@ class QimengYunheiPlugin(Star):
         self.config = config
         # 存储待踢出的云黑成员列表
         self.pending_kick_members = {}
-        # 记录每个群组的最后扫描时间
-        self.last_scan_time = {}
-        # 记录每个群组的自动清理时间阈值（秒），默认300秒（5分钟）
-        self.cleanup_threshold = {}
         # API请求频率限制相关
         self.request_timestamps = deque()
         self.max_requests = 20
         self.time_window = 5  # 秒
-        # 自动清理任务
-        self.cleanup_task = asyncio.create_task(self._periodic_cleanup())
 
     async def _rate_limited_request(self, url):
         """
@@ -55,38 +49,6 @@ class QimengYunheiPlugin(Star):
             response.raise_for_status()
             return response.json()
 
-    async def _periodic_cleanup(self):
-        """
-        定时自动清理任务
-        定期清理过期的请求记录和待踢出成员列表
-        """
-        while True:
-            try:
-                # 每30秒执行一次清理
-                await asyncio.sleep(30)
-                
-                # 清理过期的请求记录
-                current_time = time.time()
-                while self.request_timestamps and self.request_timestamps[0] < current_time - self.time_window:
-                    self.request_timestamps.popleft()
-                
-                # 清理超过设定时间未处理的待踢出成员列表
-                expired_groups = []
-                for group_id, timestamp in self.last_scan_time.items():
-                    # 获取该群组的清理阈值，默认为300秒（5分钟）
-                    threshold = self.cleanup_threshold.get(group_id, 300)
-                    if current_time - timestamp > threshold:
-                        expired_groups.append(group_id)
-                
-                for group_id in expired_groups:
-                    if group_id in self.pending_kick_members:
-                        del self.pending_kick_members[group_id]
-                        logger.info(f"已清理群组 {group_id} 的过期待踢出成员列表")
-                    del self.last_scan_time[group_id]
-                    # 不删除cleanup_threshold中的记录，因为可能需要保留用户设置
-                    
-            except Exception as e:
-                logger.error(f"定时清理任务出错: {str(e)}")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_group_add(self, event: AstrMessageEvent):
@@ -163,16 +125,15 @@ class QimengYunheiPlugin(Star):
             yield event.plain_result("请先在插件配置中填写申请的API Key")
             return
 
-        yield event.plain_result("开始扫描群成员云黑信息...")
+        yield event.plain_result("获取中...")
         
         try:
             # 获取群成员列表
-            group_member_list = await self.context.bot.get_group_member_list(
-                group_id=int(event.get_group_id()), 
-                no_cache=True
-            )
+            client = event.bot
+            group_id = event.get_group_id()
+            members_data = await client.get_group_member_list(group_id=int(group_id))
             # 提取成员QQ号列表
-            group_members = [str(member['user_id']) for member in group_member_list]
+            group_members = [str(member['user_id']) for member in members_data]
         except Exception as e:
             logger.error(f"获取群成员列表时出错: {str(e)}")
             yield event.plain_result("获取群成员列表失败")
@@ -224,7 +185,6 @@ class QimengYunheiPlugin(Star):
         # 保存待踢出成员列表
         group_id = event.get_group_id()
         self.pending_kick_members[group_id] = blacklisted_members
-        self.last_scan_time[group_id] = time.time()
         
         # 构建云黑成员列表信息
         result = f"扫描完成！发现 {len(blacklisted_members)} 名云黑成员：\n\n"
@@ -270,39 +230,6 @@ class QimengYunheiPlugin(Star):
                 
         # 清除已处理的待踢出成员列表
         del self.pending_kick_members[group_id]
-        if group_id in self.last_scan_time:
-            del self.last_scan_time[group_id]
         
         result = f"已完成踢出操作！\n成功踢出云黑成员数：{kicked_count}\n失败数：{len(blacklisted_members) - kicked_count}"
         yield event.plain_result(result)
-
-    @filter.command("设置清理时间", "设置当前群组的自动清理时间阈值（秒）")
-    async def set_cleanup_threshold(self, event: AstrMessageEvent):
-        # 检查是否在群聊中使用该命令
-        if not event.get_group_id():
-            yield event.plain_result("该命令只能在群聊中使用")
-            return
-            
-        group_id = event.get_group_id()
-        params = event.get_message().split()
-        
-        # 检查是否有提供时间参数
-        if len(params) < 2:
-            current_threshold = self.cleanup_threshold.get(group_id, 300)
-            yield event.plain_result(f"当前群组自动清理时间阈值为 {current_threshold} 秒\n用法: 设置清理时间 <秒数>")
-            return
-            
-        try:
-            threshold = int(params[1])
-            if threshold < 10:
-                yield event.plain_result("清理时间阈值不能少于10秒")
-                return
-            if threshold > 3600:
-                yield event.plain_result("清理时间阈值不能超过3600秒（1小时）")
-                return
-                
-            self.cleanup_threshold[group_id] = threshold
-            yield event.plain_result(f"已设置当前群组自动清理时间阈值为 {threshold} 秒")
-            
-        except ValueError:
-            yield event.plain_result("参数错误，请输入有效的秒数\n用法: 设置清理时间 <秒数>")
