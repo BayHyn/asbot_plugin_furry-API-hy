@@ -29,8 +29,8 @@
 
 ## 版本
 
-3.2
-
+3.3
+创建了共享了httpx.AsyncClient优化速度
 ## 作者
 
 furryhm QQ: 3322969592

@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections import deque
 
-@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.2.0")
+@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.3.0")
 class QimengYunheiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -17,6 +17,8 @@ class QimengYunheiPlugin(Star):
         self.request_timestamps = deque()
         self.max_requests = 20
         self.time_window = 5  # 秒
+        # 创建一个共享的httpx客户端
+        self.http_client = httpx.AsyncClient(timeout=10)
 
     async def _rate_limited_request(self, url):
         """
@@ -44,11 +46,61 @@ class QimengYunheiPlugin(Star):
         self.request_timestamps.append(current_time)
         
         # 发起请求
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
+        response = await self.http_client.get(url)
+        response.raise_for_status()
+        return response.json()
 
+    async def _batch_check_users(self, user_ids, api_key, batch_size=5):
+        """
+        批量检查用户云黑状态
+        """
+        blacklisted_members = []
+        
+        # 分批处理用户ID
+        for i in range(0, len(user_ids), batch_size):
+            batch = user_ids[i:i + batch_size]
+            tasks = []
+            
+            # 为每批用户创建异步任务
+            for user_id in batch:
+                api_url = f"https://fz.qimeng.fun/OpenAPI/all_f.php?id={user_id}&key={api_key}"
+                task = self._rate_limited_request(api_url)
+                tasks.append((task, user_id))
+            
+            # 并发执行当前批次的任务
+            for task, user_id in tasks:
+                try:
+                    data = await task
+                    # 解析返回数据
+                    if data.get("info"):
+                        info_list = data.get("info", [])
+                        if len(info_list) >= 3:
+                            yunhei_info = info_list[2]  # 云黑记录信息
+                            
+                            # 辅助函数用于判断布尔值
+                            def is_true(value):
+                                return str(value).lower() == 'true' if value is not None else False
+                                
+                            # 检查是否为云黑成员
+                            if is_true(yunhei_info.get('yh')):
+                                # 保存云黑成员信息
+                                blacklisted_members.append({
+                                    'id': user_id,
+                                    'reason': yunhei_info.get('note', '无说明'),
+                                    'type': yunhei_info.get('type', '未知'),
+                                    'admin': yunhei_info.get('admin', '未知'),
+                                    'level': yunhei_info.get('level', '无'),
+                                    'date': yunhei_info.get('date', '无记录')
+                                })
+                except Exception as e:
+                    logger.error(f"查询成员 {user_id} 时出错: {str(e)}")
+                    continue
+                    
+            # 在批次之间添加小延迟以避免触发API限制
+            if i + batch_size < len(user_ids):
+                await asyncio.sleep(0.1)
+                
+        return blacklisted_members
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_group_add(self, event: AstrMessageEvent):
@@ -143,41 +195,9 @@ class QimengYunheiPlugin(Star):
             yield event.plain_result("无法获取群成员列表")
             return
             
-        blacklisted_members = []
+        # 批量检查所有群成员
+        blacklisted_members = await self._batch_check_users(group_members, api_key)
         
-        for member_id in group_members:
-            # 构造API请求URL
-            api_url = f"https://fz.qimeng.fun/OpenAPI/all_f.php?id={member_id}&key={api_key}"
-            
-            try:
-                data = await self._rate_limited_request(api_url)
-                
-                # 解析返回数据
-                if data.get("info"):
-                    info_list = data.get("info", [])
-                    if len(info_list) >= 3:
-                        yunhei_info = info_list[2]  # 云黑记录信息
-                        
-                        # 辅助函数用于判断布尔值
-                        def is_true(value):
-                            return str(value).lower() == 'true' if value is not None else False
-                            
-                        # 检查是否为云黑成员
-                        if is_true(yunhei_info.get('yh')):
-                            # 保存云黑成员信息
-                            blacklisted_members.append({
-                                'id': member_id,
-                                'reason': yunhei_info.get('note', '无说明'),
-                                'type': yunhei_info.get('type', '未知'),
-                                'admin': yunhei_info.get('admin', '未知'),
-                                'level': yunhei_info.get('level', '无'),
-                                'date': yunhei_info.get('date', '无记录')
-                            })
-                
-            except Exception as e:
-                logger.error(f"查询成员 {member_id} 时出错: {str(e)}")
-                continue
-                
         if not blacklisted_members:
             yield event.plain_result("扫描完成！未发现云黑成员。")
             return
