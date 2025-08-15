@@ -79,7 +79,7 @@ class QimengYunheiPlugin(Star):
             
             # 解析返回数据
             if data.get("info"):
-                info_list = data.get("info", [{}])[0].get("info", [])
+                info_list = data.get("info", [])
                 if len(info_list) >= 3:
                     yunhei_info = info_list[2]  # 云黑记录信息
                     
@@ -154,7 +154,7 @@ class QimengYunheiPlugin(Star):
                 
                 # 解析返回数据
                 if data.get("info"):
-                    info_list = data.get("info", [{}])[0].get("info", [])
+                    info_list = data.get("info", [])
                     if len(info_list) >= 3:
                         yunhei_info = info_list[2]  # 云黑记录信息
                         
