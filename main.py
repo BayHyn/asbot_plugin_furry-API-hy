@@ -46,6 +46,7 @@ class QimengYunheiPlugin(Star):
             oldest_request_time = self.request_timestamps[0]
             sleep_time = self.time_window - (current_time - oldest_request_time)
             if sleep_time > 0:
+                logger.debug(f"达到频率限制，等待 {sleep_time:.2f} 秒")
                 await asyncio.sleep(sleep_time)
                 # 再次清理过期的请求记录
                 current_time = time.time()
@@ -54,33 +55,46 @@ class QimengYunheiPlugin(Star):
         
         # 记录当前请求时间
         self.request_timestamps.append(current_time)
+        logger.debug(f"发起API请求，当前窗口请求数: {len(self.request_timestamps)}")
         
         # 发起请求
         response = await self.http_client.get(url)
         response.raise_for_status()
         return response.json()
 
-    async def _batch_check_users(self, user_ids, api_key, batch_size=5):
+    async def _batch_check_users(self, user_ids, api_key, batch_size=20):
         """
         批量检查用户云黑状态
         """
         blacklisted_members = []
         
+        # 记录开始批量检查
+        logger.info(f"开始批量检查 {len(user_ids)} 个用户云黑状态，批量大小: {batch_size}")
+        
         # 分批处理用户ID
         for i in range(0, len(user_ids), batch_size):
             batch = user_ids[i:i + batch_size]
-            tasks = []
+            
+            logger.debug(f"正在处理批次 {i//batch_size + 1}，包含 {len(batch)} 个用户")
             
             # 为每批用户创建异步任务
+            tasks = []
             for user_id in batch:
                 api_url = f"https://fz.qimeng.fun/OpenAPI/all_f.php?id={user_id}&key={api_key}"
                 task = self._rate_limited_request(api_url)
                 tasks.append((task, user_id))
             
             # 并发执行当前批次的任务
-            for task, user_id in tasks:
+            results = await asyncio.gather(*[task for task, _ in tasks], return_exceptions=True)
+            
+            # 处理结果
+            for (result, user_id), task_result in zip(tasks, results):
                 try:
-                    data = await task
+                    if isinstance(task_result, Exception):
+                        logger.error(f"查询成员 {user_id} 时出错: {str(task_result)}")
+                        continue
+                    
+                    data = task_result
                     # 解析返回数据
                     if data.get("info"):
                         info_list = data.get("info", [])
@@ -94,22 +108,29 @@ class QimengYunheiPlugin(Star):
                             # 检查是否为云黑成员
                             if is_true(yunhei_info.get('yh')):
                                 # 保存云黑成员信息
-                                blacklisted_members.append({
+                                blacklisted_member = {
                                     'id': user_id,
                                     'reason': yunhei_info.get('note', '无说明'),
                                     'type': yunhei_info.get('type', '未知'),
                                     'admin': yunhei_info.get('admin', '未知'),
                                     'level': yunhei_info.get('level', '无'),
                                     'date': yunhei_info.get('date', '无记录')
-                                })
+                                }
+                                blacklisted_members.append(blacklisted_member)
+                                logger.info(f"发现云黑成员: {user_id}, 原因: {blacklisted_member['reason']}")
+                            else:
+                                logger.debug(f"用户 {user_id} 不是云黑成员")
+                    else:
+                        logger.warning(f"用户 {user_id} 的查询返回空数据")
                 except Exception as e:
-                    logger.error(f"查询成员 {user_id} 时出错: {str(e)}")
+                    logger.error(f"处理成员 {user_id} 的查询结果时出错: {str(e)}")
                     continue
                     
             # 在批次之间添加小延迟以避免触发API限制
             if i + batch_size < len(user_ids):
                 await asyncio.sleep(0.1)
                 
+        logger.info(f"批量检查完成，共发现 {len(blacklisted_members)} 名云黑成员")
         return blacklisted_members
 
     @filter.event_message_type(filter.EventMessageType.ALL)
