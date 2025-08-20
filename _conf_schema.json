@@ -4,5 +4,11 @@
         "type": "string",
         "hint": "请填写你在趣绮梦云黑平台申请的API Key",
         "obvious_hint": true
+    },
+    "auto_check_whitelist": {
+        "description": "进群自动检测云黑功能的群白名单",
+        "type": "list",
+        "hint": "仅在列表中的群启用进群自动检测云黑功能，留空则在所有已启用群功能中生效",
+        "obvious_hint": true
     }
 }

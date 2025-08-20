@@ -1,24 +1,34 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
+import astrbot.api.message_components as message_components
 import httpx
 import asyncio
 import time
 from collections import deque
 
-@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.3.0")
+@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.4.0")
 class QimengYunheiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         # 存储待踢出的云黑成员列表
         self.pending_kick_members = {}
+        # 群白名单存储 {group_id: [user_id, ...]}
+        self.group_whitelist = {}
         # API请求频率限制相关
         self.request_timestamps = deque()
         self.max_requests = 20
         self.time_window = 5  # 秒
         # 创建一个共享的httpx客户端
         self.http_client = httpx.AsyncClient(timeout=10)
+        
+        # 获取启用云黑检测的群列表
+        self.enabled_groups = self.config.get("enabled_groups", [])
+        # 获取群组配置，用于存储每个群组的独立配置
+        self.group_configs = self.config.get("group_configs", {})
+        # 获取启用进群自动检测云黑功能的群白名单
+        self.auto_check_whitelist = self.config.get("auto_check_whitelist", [])
 
     async def _rate_limited_request(self, url):
         """
@@ -116,6 +126,27 @@ class QimengYunheiPlugin(Star):
         group_id = raw_message.get('group_id')
         user_id = raw_message.get('user_id')
         
+        # 记录日志
+        logger.info(f"检测到群成员增加事件: 群ID={group_id}, 成员ID={user_id}")
+        
+        # 统一转换group_id为整数类型用于比较
+        group_id_int = int(group_id)
+        
+        # 检查是否在启用云黑检测的群列表中
+        if self.enabled_groups and group_id_int not in self.enabled_groups:
+            logger.info(f"群 {group_id} 不在启用云黑检测的群列表中，跳过检测")
+            return
+            
+        # 检查是否在进群自动检测云黑功能的群白名单中
+        # 如果配置了白名单且当前群组不在白名单中，则不执行检测
+        if self.auto_check_whitelist and group_id_int not in [int(x) for x in self.auto_check_whitelist]:
+            logger.info(f"群 {group_id} 不在进群自动检测云黑功能的群白名单中，跳过检测")
+            return
+        # 如果没有配置白名单，则默认不执行检测（白名单为空时功能关闭）
+        elif not self.auto_check_whitelist:
+            logger.info("未配置进群自动检测云黑功能的群白名单，跳过检测")
+            return
+            
         # 检查API Key是否配置
         api_key = self.config.get("api_key", "")
         if not api_key:
@@ -125,6 +156,8 @@ class QimengYunheiPlugin(Star):
         try:
             # 构造API请求URL
             api_url = f"https://fz.qimeng.fun/OpenAPI/all_f.php?id={user_id}&key={api_key}"
+            
+            logger.info(f"正在查询成员 {user_id} 的云黑状态，请求URL: {api_url}")
             
             # 发起API请求
             data = await self._rate_limited_request(api_url)
@@ -139,32 +172,54 @@ class QimengYunheiPlugin(Star):
                     def is_true(value):
                         return str(value).lower() == 'true' if value is not None else False
                         
+                    # 构建API返回信息
+                    reason = yunhei_info.get('note', '无说明')
+                    type_ = yunhei_info.get('type', '未知')
+                    admin = yunhei_info.get('admin', '未知')
+                    level = yunhei_info.get('level', '无')
+                    date = yunhei_info.get('date', '无记录')
+                    
+                    # 如果是空字符串，则设置为"无"或友好的提示信息
+                    if not reason or reason.strip() == "":
+                        reason = "无说明"
+                    if not type_ or type_.strip() == "":
+                        type_ = "未知"
+                    if not admin or admin.strip() == "":
+                        admin = "未知"
+                    if not level or level.strip() == "":
+                        level = "无"
+                    if not date or date.strip() == "":
+                        date = "无记录"
+                    
                     # 检查是否为云黑成员
                     if is_true(yunhei_info.get('yh')):
-                        # 获取云黑信息
-                        reason = yunhei_info.get('note', '无说明')
-                        type_ = yunhei_info.get('type', '未知')
-                        admin = yunhei_info.get('admin', '未知')
-                        level = yunhei_info.get('level', '无')
-                        date = yunhei_info.get('date', '无记录')
+                        logger.info(f"检测到云黑成员: {user_id}，原因: {reason}，类型: {type_}，日期: {date}")
                         
                         # 踢出成员
-                        await self.context.bot.set_group_kick(
-                            group_id=int(group_id), 
+                        await event.bot.set_group_kick(
+                            group_id=group_id_int, 
                             user_id=int(user_id), 
                             reject_add_request=False
                         )
                         
-                        # 发送通知消息
+                        # 发送踢出通知消息
                         kick_message = f"检测到云黑成员 {user_id} 已被自动踢出\n原因: {reason}\n类型: {type_}\n日期: {date}"
-                        await self.context.bot.send_message(group_id=int(group_id), message=kick_message)
+                        yield event.plain_result(kick_message)
                         
-                        logger.info(f"已踢出云黑成员: {user_id}，原因: {reason}，类型: {type_}，日期: {date}")
+                        logger.info(f"已踢出云黑成员: {user_id}，原因: {reason}，类型: {type_}\n日期: {date}")
+                    else:
+                        logger.info(f"成员 {user_id} 不是云黑用户，原因: {reason}，类型: {type_}，等级: {level}，日期: {date}")
+                        
+                        # 发送正常成员检测信息
+                        normal_message = f"新成员 {user_id} 不是云黑用户\n原因: {reason}\n类型: {type_}\n等级: {level}\n日期: {date}"
+                        yield event.plain_result(normal_message)
+            else:
+                logger.info(f"查询成员 {user_id} 的云黑状态返回空数据")
                         
         except Exception as e:
             logger.error(f"检测新成员 {user_id} 云黑状态时出错: {str(e)}")
 
-    @filter.command("扫描云黑成员", "扫描所有群云黑成员，显示云黑成员列表")
+    @filter.command("大扫除", "扫描所有群云黑成员，大扫除!")
     async def scan_group_members(self, event: AstrMessageEvent):
         # 检查是否在群聊中使用该命令
         if not event.get_group_id():
