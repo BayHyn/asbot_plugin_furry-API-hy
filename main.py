@@ -7,7 +7,7 @@ import asyncio
 import time
 from collections import deque
 
-@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.4.0")
+@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.4.1")
 class QimengYunheiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -60,7 +60,36 @@ class QimengYunheiPlugin(Star):
         # 发起请求
         response = await self.http_client.get(url)
         response.raise_for_status()
-        return response.json()
+        
+        # 检查响应内容是否为空
+        if not response.content:
+            logger.warning(f"API返回空响应: {url}")
+            return {}
+            
+        # 尝试解析JSON
+        try:
+            return response.json()
+        except Exception as e:
+            # 尝试修复格式错误的JSON
+            response_text = response.text
+            if response_text:
+                # 修复无效的JSON格式（如 [,{} ] 这种情况）
+                import re
+                # 修复以逗号开头的数组元素
+                response_text = re.sub(r'\[\s*,', '[', response_text)
+                # 修复以逗号结尾的数组元素
+                response_text = re.sub(r',\s*\]', ']', response_text)
+                
+                try:
+                    import json
+                    fixed_data = json.loads(response_text)
+                    logger.warning(f"已修复格式错误的JSON: {url}")
+                    return fixed_data
+                except Exception as fix_error:
+                    logger.error(f"尝试修复JSON失败: {str(fix_error)}")
+            
+            logger.error(f"API响应JSON解析失败，响应内容: {response.text}")
+            raise ValueError(f"API返回非JSON数据: {str(e)}") from e
 
     async def _batch_check_users(self, user_ids, api_key, batch_size=20):
         """
@@ -68,12 +97,20 @@ class QimengYunheiPlugin(Star):
         """
         blacklisted_members = []
         
+        # 过滤掉无效的用户ID（如空字符串、None等）
+        valid_user_ids = [user_id for user_id in user_ids if user_id and str(user_id).strip()]
+        
         # 记录开始批量检查
-        logger.info(f"开始批量检查 {len(user_ids)} 个用户云黑状态，批量大小: {batch_size}")
+        logger.info(f"开始批量检查 {len(valid_user_ids)} 个用户云黑状态，批量大小: {batch_size}")
+        
+        # 如果没有有效用户ID，直接返回
+        if not valid_user_ids:
+            logger.info("没有有效的用户ID需要检查")
+            return blacklisted_members
         
         # 分批处理用户ID
-        for i in range(0, len(user_ids), batch_size):
-            batch = user_ids[i:i + batch_size]
+        for i in range(0, len(valid_user_ids), batch_size):
+            batch = valid_user_ids[i:i + batch_size]
             
             logger.debug(f"正在处理批次 {i//batch_size + 1}，包含 {len(batch)} 个用户")
             
@@ -95,6 +132,11 @@ class QimengYunheiPlugin(Star):
                         continue
                     
                     data = task_result
+                    # 检查返回数据是否为空或无效
+                    if not data:
+                        logger.warning(f"查询成员 {user_id} 返回空数据")
+                        continue
+                        
                     # 解析返回数据
                     if data.get("info"):
                         info_list = data.get("info", [])
@@ -127,7 +169,7 @@ class QimengYunheiPlugin(Star):
                     continue
                     
             # 在批次之间添加小延迟以避免触发API限制
-            if i + batch_size < len(user_ids):
+            if i + batch_size < len(valid_user_ids):
                 await asyncio.sleep(0.1)
                 
         logger.info(f"批量检查完成，共发现 {len(blacklisted_members)} 名云黑成员")
@@ -183,6 +225,11 @@ class QimengYunheiPlugin(Star):
             # 发起API请求
             data = await self._rate_limited_request(api_url)
             
+            # 检查返回数据是否为空或无效
+            if not data:
+                logger.warning(f"查询成员 {user_id} 返回空数据")
+                return
+                
             # 解析返回数据
             if data.get("info"):
                 info_list = data.get("info", [])
