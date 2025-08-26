@@ -7,7 +7,7 @@ import asyncio
 import time
 from collections import deque
 
-@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.4.1")
+@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.5.0")
 class QimengYunheiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -300,7 +300,7 @@ class QimengYunheiPlugin(Star):
             yield event.plain_result("请先在插件配置中填写申请的API Key")
             return
 
-        yield event.plain_result("获取中...")
+        yield event.plain_result("收到~正在大扫除，请稍候...")
         
         try:
             # 获取群成员列表
@@ -321,12 +321,63 @@ class QimengYunheiPlugin(Star):
         # 批量检查所有群成员
         blacklisted_members = await self._batch_check_users(group_members, api_key)
         
+        # 尝试使用图片生成插件
+        try:
+            # 尝试导入并使用图片插件提供的全局函数
+            import importlib.util
+            import sys
+            import os
+            
+            # 构建插件路径
+            plugin_path = os.path.join(os.path.dirname(__file__), '..', 'asbot_plugin_furry-API-hykz', 'main.py')
+            plugin_path = os.path.abspath(plugin_path)
+            
+            if os.path.exists(plugin_path):
+                # 动态导入模块
+                spec = importlib.util.spec_from_file_location("asbot_plugin_furry_API_hykz.main", plugin_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                
+                # 调用图片生成函数
+                img_base64 = await module.create_scan_result_image(
+                    self.context,
+                    len(group_members),
+                    len(blacklisted_members),
+                    blacklisted_members,
+                    str(group_id)
+                )
+                
+                # 保存图片到临时文件并发送
+                import base64
+                import tempfile
+                
+                # 创建临时文件
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                    # 将base64数据解码并写入文件
+                    image_data = base64.b64decode(img_base64)
+                    tmp_file.write(image_data)
+                    tmp_file_path = tmp_file.name
+                
+                # 发送图片
+                yield event.image_result(tmp_file_path)
+                # 清理临时文件
+                import os
+                try:
+                    os.unlink(tmp_file_path)
+                except:
+                    pass
+                return
+            else:
+                logger.info("未检测到图片生成插件，使用文本结果")
+        except Exception as e:
+            logger.error(f"生成图片时出错: {e}，使用文本结果")
+        
+        # 原始文本结果逻辑
         if not blacklisted_members:
             yield event.plain_result("扫描完成！未发现云黑成员。")
             return
             
         # 保存待踢出成员列表
-        group_id = event.get_group_id()
         self.pending_kick_members[group_id] = blacklisted_members
         
         # 构建云黑成员列表信息
