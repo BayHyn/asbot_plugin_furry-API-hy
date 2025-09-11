@@ -7,7 +7,7 @@ import asyncio
 import time
 from collections import deque
 
-@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.5.0")
+@register("asbot_plugin_furry-API-hy", "furryhm", "调用趣绮梦云黑API的群黑云查询踢出还有进群自动检测黑云有问题自动踢出的插件", "3.5.1")
 class QimengYunheiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -97,8 +97,9 @@ class QimengYunheiPlugin(Star):
         """
         blacklisted_members = []
         
-        # 过滤掉无效的用户ID（如空字符串、None等）
-        valid_user_ids = [user_id for user_id in user_ids if user_id and str(user_id).strip()]
+        # 过滤掉无效的用户ID（如空字符串、None、0或负数或位数少于5位）
+        valid_user_ids = [user_id for user_id in user_ids 
+                         if user_id and str(user_id).strip() and int(user_id) > 0 and len(str(user_id)) >= 5]
         
         # 记录开始批量检查
         logger.info(f"开始批量检查 {len(valid_user_ids)} 个用户云黑状态，批量大小: {batch_size}")
@@ -107,6 +108,9 @@ class QimengYunheiPlugin(Star):
         if not valid_user_ids:
             logger.info("没有有效的用户ID需要检查")
             return blacklisted_members
+        
+        # 使用集合来确保用户ID唯一性
+        processed_user_ids = set()
         
         # 分批处理用户ID
         for i in range(0, len(valid_user_ids), batch_size):
@@ -117,6 +121,11 @@ class QimengYunheiPlugin(Star):
             # 为每批用户创建异步任务
             tasks = []
             for user_id in batch:
+                # 避免重复处理同一个用户
+                if user_id in processed_user_ids:
+                    continue
+                processed_user_ids.add(user_id)
+                
                 api_url = f"https://fz.qimeng.fun/OpenAPI/all_f.php?id={user_id}&key={api_key}"
                 task = self._rate_limited_request(api_url)
                 tasks.append((task, user_id))
@@ -140,7 +149,8 @@ class QimengYunheiPlugin(Star):
                     # 解析返回数据
                     if data.get("info"):
                         info_list = data.get("info", [])
-                        if len(info_list) >= 3:
+                        # 确保info_list至少有3个元素且第三个元素是字典类型
+                        if len(info_list) >= 3 and isinstance(info_list[2], dict):
                             yunhei_info = info_list[2]  # 云黑记录信息
                             
                             # 辅助函数用于判断布尔值
@@ -162,6 +172,8 @@ class QimengYunheiPlugin(Star):
                                 logger.info(f"发现云黑成员: {user_id}, 原因: {blacklisted_member['reason']}")
                             else:
                                 logger.debug(f"用户 {user_id} 不是云黑成员")
+                        else:
+                            logger.warning(f"用户 {user_id} 的查询返回数据格式不正确: {info_list}")
                     else:
                         logger.warning(f"用户 {user_id} 的查询返回空数据")
                 except Exception as e:
@@ -307,8 +319,9 @@ class QimengYunheiPlugin(Star):
             client = event.bot
             group_id = event.get_group_id()
             members_data = await client.get_group_member_list(group_id=int(group_id))
-            # 提取成员QQ号列表
-            group_members = [str(member['user_id']) for member in members_data]
+            # 提取成员QQ号列表，并过滤掉无效的用户ID（如0或负数或位数少于5位）
+            group_members = [str(member['user_id']) for member in members_data 
+                           if member['user_id'] > 0 and len(str(member['user_id'])) >= 5]
         except Exception as e:
             logger.error(f"获取群成员列表时出错: {str(e)}")
             yield event.plain_result("获取群成员列表失败")
